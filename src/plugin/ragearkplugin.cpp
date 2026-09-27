@@ -132,7 +132,8 @@ void RageArkPlugin::buildListing()
         l.item = int(i);
         l.isDirectory = item.isDirectory;
         if (!item.isDirectory) {
-            l.size = re.logicalSize();
+            // resources are extracted as RSC7 files (header + stored payload)
+            l.size = re.type == rageark::EntryType::Resource ? re.storedSize() : re.logicalSize();
             l.compressedSize = re.storedSize();
         }
         if (decodeAwc && !item.isDirectory && re.type == rageark::EntryType::Binary && rageark::endsWith(rageark::toLower(re.name), ".awc")) {
