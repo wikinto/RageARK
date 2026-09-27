@@ -193,6 +193,7 @@ bool RageArkPlugin::list()
         if (!l.isDirectory) {
             e->setProperty("size", qulonglong(l.size));
             e->setProperty("compressedSize", qulonglong(l.compressedSize));
+            e->compressedSizeIsSet = true;
         }
         Q_EMIT entry(e);
         Q_EMIT progress(double(++done) / double(m_listed.size() + 1));
@@ -398,6 +399,7 @@ bool RageArkPlugin::editArchive(const std::function<void(rageark::ArchiveEditor 
                 if (!l.isDirectory) {
                     e->setProperty("size", qulonglong(l.size));
                     e->setProperty("compressedSize", qulonglong(l.compressedSize));
+                    e->compressedSizeIsSet = true;
                 }
                 Q_EMIT entry(e);
             }

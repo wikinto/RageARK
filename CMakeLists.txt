@@ -7,7 +7,10 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
-include(KDEInstallDirs)
+# install next to Ark's own plugins ($QT_PLUGIN_DIR/kerfuffle)
+set(QT_MAJOR_VERSION 6)
+set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install plugins into Qt's plugin directory")
+include(KDEInstallDirs6)
 include(KDECMakeSettings)
 
 # must be set after the KDE includes (they reset output directories)
@@ -58,7 +61,7 @@ target_link_libraries(kerfuffle_rageark
         ${KERFUFFLE_LIBRARY})
 
 install(FILES mime/x-rockstar-rpf.xml
-        DESTINATION ${KDE_INSTALL_MIMEDIR}/packages)
+        DESTINATION ${KDE_INSTALL_MIMEDIR})
 if(RAGEARK_MAGIC_DAT)
     install(FILES ${RAGEARK_MAGIC_DAT} DESTINATION ${KDE_INSTALL_DATADIR}/rageark)
 endif()
