@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-rockstar-rpf">
+    <comment>Grand Theft Auto V RPF archive</comment>
+    <glob pattern="*.rpf"/>
+    <magic priority="80">
+      <match type="string" value="7FPR" offset="0"/>
+    </magic>
+  </mime-type>
+</mime-info>

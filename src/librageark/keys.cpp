@@ -1,0 +1,419 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Port of CodeWalker GTACrypto.cs / GTAKeys.cs (Copyright (c) 2015 Neodymium, MIT).
+#include "keys.h"
+
+#include "deflate.h"
+#include "keyhashes.h"
+
+#include <openssl/evp.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <fcntl.h>
+#include <mutex>
+#include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
+
+namespace rageark
+{
+
+const GameProfile &GameProfile::gta5()
+{
+    static const GameProfile p{"gta5", {"GTA5_Enhanced.exe", "GTA5.exe"}};
+    return p;
+}
+
+// ---- .NET Framework System.Random(int seed) (Knuth subtractive generator) ----
+namespace
+{
+class NetRandom
+{
+public:
+    explicit NetRandom(int32_t seed)
+    {
+        const int32_t mbig = 0x7FFFFFFF;
+        const int32_t mseed = 161803398;
+        const int32_t subtraction = (seed == INT32_MIN) ? mbig : std::abs(seed);
+        int32_t mj = mseed - subtraction;
+        m_seed[55] = mj;
+        int32_t mk = 1;
+        for (int i = 1; i < 55; ++i) {
+            const int ii = (21 * i) % 55;
+            m_seed[ii] = mk;
+            mk = mj - mk;
+            if (mk < 0) {
+                mk += mbig;
+            }
+            mj = m_seed[ii];
+        }
+        for (int k = 1; k < 5; ++k) {
+            for (int i = 1; i < 56; ++i) {
+                // wrap like C# int arithmetic
+                m_seed[i] = int32_t(uint32_t(m_seed[i]) - uint32_t(m_seed[1 + (i + 30) % 55]));
+                if (m_seed[i] < 0) {
+                    m_seed[i] += mbig;
+                }
+            }
+        }
+    }
+
+    int32_t sample()
+    {
+        if (++m_inext >= 56) {
+            m_inext = 1;
+        }
+        if (++m_inextp >= 56) {
+            m_inextp = 1;
+        }
+        int32_t r = int32_t(uint32_t(m_seed[m_inext]) - uint32_t(m_seed[m_inextp]));
+        if (r == 0x7FFFFFFF) {
+            --r;
+        }
+        if (r < 0) {
+            r += 0x7FFFFFFF;
+        }
+        m_seed[m_inext] = r;
+        return r;
+    }
+
+    void nextBytes(uint8_t *out, size_t n)
+    {
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = uint8_t(sample() % 256);
+        }
+    }
+
+private:
+    int32_t m_seed[56] = {};
+    int m_inext = 0;
+    int m_inextp = 21;
+};
+
+void sha1(const uint8_t *data, size_t len, uint8_t out[20])
+{
+    unsigned int outLen = 20;
+    EVP_Digest(data, len, out, &outLen, EVP_sha1(), nullptr);
+}
+
+void aesEcb(const uint8_t key[32], uint8_t *data, size_t len, bool encrypt)
+{
+    const size_t n = len - len % 16;
+    if (n == 0) {
+        return;
+    }
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        throw Error("EVP_CIPHER_CTX_new failed");
+    }
+    int outl = 0;
+    bool ok = EVP_CipherInit_ex(ctx, EVP_aes_256_ecb(), nullptr, key, nullptr, encrypt ? 1 : 0) == 1;
+    ok = ok && EVP_CIPHER_CTX_set_padding(ctx, 0) == 1;
+    ok = ok && EVP_CipherUpdate(ctx, data, &outl, data, int(n)) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok || size_t(outl) != n) {
+        throw Error("AES operation failed");
+    }
+}
+
+// Parallel SHA-1 window search over 8-byte aligned offsets (CodeWalker HashSearch).
+std::vector<Bytes> searchHashes(const Bytes &exe, const uint8_t (*hashes)[20], size_t count, size_t length)
+{
+    std::vector<Bytes> result(count);
+    if (exe.size() < length) {
+        return result;
+    }
+    const size_t positions = (exe.size() - length) / 8 + 1;
+    const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    std::mutex mtx;
+    std::atomic<size_t> found{0};
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back([&, t] {
+            uint8_t h[20];
+            for (size_t i = t; i < positions && found.load() < count; i += threads) {
+                const uint8_t *w = exe.data() + i * 8;
+                sha1(w, length, h);
+                for (size_t j = 0; j < count; ++j) {
+                    if (std::memcmp(h, hashes[j], 20) == 0) {
+                        std::lock_guard<std::mutex> lock(mtx);
+                        if (result[j].empty()) {
+                            result[j].assign(w, w + length);
+                            ++found;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for (auto &th : pool) {
+        th.join();
+    }
+    return result;
+}
+
+void readNgKeys(Keys &keys, const uint8_t *p)
+{
+    keys.ngKeys.assign(101, {});
+    for (size_t i = 0; i < 101; ++i) {
+        for (size_t w = 0; w < 68; ++w) {
+            keys.ngKeys[i][w] = readU32(p + i * 272 + w * 4);
+        }
+    }
+}
+
+void readNgTables(Keys &keys, const uint8_t *p)
+{
+    keys.ngDecryptTables.resize(17 * 16 * 256);
+    for (size_t i = 0; i < keys.ngDecryptTables.size(); ++i) {
+        keys.ngDecryptTables[i] = readU32(p + i * 4);
+    }
+}
+} // namespace
+
+uint32_t jenkHash(const uint8_t *data, size_t len)
+{
+    uint32_t h = 0;
+    for (size_t i = 0; i < len; ++i) {
+        h += data[i];
+        h += h << 10;
+        h ^= h >> 6;
+    }
+    h += h << 3;
+    h ^= h >> 11;
+    h += h << 15;
+    return h;
+}
+
+uint32_t gta5Hash(const Keys &keys, const std::string &text)
+{
+    uint32_t result = 0;
+    for (unsigned char c : text) {
+        const uint32_t temp = 1025u * (keys.hashLut[c] + result);
+        result = (temp >> 6) ^ temp;
+    }
+    return 32769u * (((9u * result) >> 11) ^ (9u * result));
+}
+
+void applyMagicData(Keys &keys, const Bytes &magic)
+{
+    NetRandom rnd(int32_t(jenkHash(keys.aesKey.data(), keys.aesKey.size())));
+    Bytes db(magic.size());
+    Bytes r(magic.size());
+    std::copy(magic.begin(), magic.end(), db.begin());
+    for (int k = 0; k < 4; ++k) {
+        rnd.nextBytes(r.data(), r.size());
+        for (size_t i = 0; i < db.size(); ++i) {
+            db[i] = uint8_t(db[i] - r[i]);
+        }
+    }
+    aesEcb(keys.aesKey.data(), db.data(), db.size(), false);
+    auto b = tryInflateRaw(db.data(), db.size(), 306272);
+    if (!b || b->size() < 306272) {
+        throw Error("magic.dat could not be decoded (wrong AES key or wrong magic.dat)");
+    }
+    const uint8_t *p = b->data();
+    readNgKeys(keys, p);
+    readNgTables(keys, p + 27472);
+    std::copy(p + 306000, p + 306256, keys.hashLut.begin());
+    for (size_t i = 0; i < 4; ++i) {
+        keys.awcKey[i] = readU32(p + 306256 + i * 4);
+    }
+}
+
+Keys deriveKeys(const std::string &exePath, const std::string &magicDatPath, const ProgressFn &progress)
+{
+    auto say = [&](const std::string &s) {
+        if (progress) {
+            progress(s);
+        }
+    };
+    say("Reading " + exePath);
+    const Bytes exe = readWholeFile(exePath);
+
+    Keys keys;
+    say("Searching for AES key...");
+    auto aes = searchHashes(exe, &keyhashes::AesKey, 1, 32);
+    if (aes[0].empty()) {
+        throw Error("AES key not found: " + exePath + " is not a supported GTA V executable");
+    }
+    std::copy(aes[0].begin(), aes[0].end(), keys.aesKey.begin());
+
+    if (!magicDatPath.empty()) {
+        say("Decoding magic.dat...");
+        applyMagicData(keys, readWholeFile(magicDatPath));
+        return keys;
+    }
+
+    // no magic.dat: full scan (works for Legacy exes that contain the NG tables)
+    say("Searching for NG keys...");
+    auto ng = searchHashes(exe, keyhashes::NgKeys, 101, 0x110);
+    say("Searching for NG decrypt tables...");
+    auto tabs = searchHashes(exe, keyhashes::NgDecryptTables, 272, 0x400);
+    auto lut = searchHashes(exe, &keyhashes::HashLut, 1, 0x100);
+    for (const auto &k : ng) {
+        if (k.empty()) {
+            throw Error("NG keys not found in the executable; magic.dat is required (GTA V Enhanced)");
+        }
+    }
+    for (const auto &t : tabs) {
+        if (t.empty()) {
+            throw Error("NG tables not found in the executable; magic.dat is required (GTA V Enhanced)");
+        }
+    }
+    if (lut[0].empty()) {
+        throw Error("hash lookup table not found in the executable");
+    }
+    Bytes keyBlob;
+    for (const auto &k : ng) {
+        keyBlob.insert(keyBlob.end(), k.begin(), k.end());
+    }
+    readNgKeys(keys, keyBlob.data());
+    Bytes tabBlob;
+    for (const auto &t : tabs) {
+        tabBlob.insert(tabBlob.end(), t.begin(), t.end());
+    }
+    readNgTables(keys, tabBlob.data());
+    std::copy(lut[0].begin(), lut[0].end(), keys.hashLut.begin());
+    return keys;
+}
+
+// ---- cache ----
+static const char CacheMagic[8] = {'R', 'A', 'G', 'E', 'K', 'E', 'Y', '1'};
+static constexpr size_t CacheSize = 8 + 32 + 101 * 272 + 17 * 16 * 256 * 4 + 256 + 16;
+
+void saveKeysCache(const Keys &keys, const std::string &path)
+{
+    Bytes b;
+    b.insert(b.end(), CacheMagic, CacheMagic + 8);
+    b.insert(b.end(), keys.aesKey.begin(), keys.aesKey.end());
+    for (const auto &k : keys.ngKeys) {
+        for (uint32_t w : k) {
+            appendU32(b, w);
+        }
+    }
+    for (uint32_t w : keys.ngDecryptTables) {
+        appendU32(b, w);
+    }
+    b.insert(b.end(), keys.hashLut.begin(), keys.hashLut.end());
+    for (uint32_t w : keys.awcKey) {
+        appendU32(b, w);
+    }
+    // derived keys are private to the user
+    const std::string tmp = path + ".tmp";
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        throw Error("cannot write key cache " + tmp);
+    }
+    size_t off = 0;
+    while (off < b.size()) {
+        const ssize_t n = ::write(fd, b.data() + off, b.size() - off);
+        if (n <= 0) {
+            ::close(fd);
+            throw Error("cannot write key cache " + tmp);
+        }
+        off += size_t(n);
+    }
+    ::close(fd);
+    if (::rename(tmp.c_str(), path.c_str()) != 0) {
+        throw Error("cannot move key cache into place: " + path);
+    }
+}
+
+std::unique_ptr<Keys> loadKeysCache(const std::string &path)
+{
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0 || size_t(st.st_size) != CacheSize) {
+        return nullptr;
+    }
+    const Bytes b = readWholeFile(path);
+    if (std::memcmp(b.data(), CacheMagic, 8) != 0) {
+        return nullptr;
+    }
+    auto keys = std::make_unique<Keys>();
+    const uint8_t *p = b.data() + 8;
+    std::copy(p, p + 32, keys->aesKey.begin());
+    p += 32;
+    readNgKeys(*keys, p);
+    p += 101 * 272;
+    readNgTables(*keys, p);
+    p += 17 * 16 * 256 * 4;
+    std::copy(p, p + 256, keys->hashLut.begin());
+    p += 256;
+    for (size_t i = 0; i < 4; ++i) {
+        keys->awcKey[i] = readU32(p + i * 4);
+    }
+    return keys;
+}
+
+// ---- ciphers ----
+KeyCrypto::KeyCrypto(std::shared_ptr<const Keys> keys)
+    : m_keys(std::move(keys))
+{
+}
+
+void KeyCrypto::decryptAes(uint8_t *data, size_t len) const
+{
+    aesEcb(m_keys->aesKey.data(), data, len, false);
+}
+
+void KeyCrypto::encryptAes(uint8_t *data, size_t len) const
+{
+    aesEcb(m_keys->aesKey.data(), data, len, true);
+}
+
+namespace
+{
+inline void roundA(uint8_t *b, const uint32_t *key, const Keys &k, int round)
+{
+    uint32_t x[4];
+    for (int w = 0; w < 4; ++w) {
+        x[w] = k.table(round, 4 * w)[b[4 * w]] ^ k.table(round, 4 * w + 1)[b[4 * w + 1]] ^ k.table(round, 4 * w + 2)[b[4 * w + 2]]
+            ^ k.table(round, 4 * w + 3)[b[4 * w + 3]] ^ key[w];
+    }
+    for (int w = 0; w < 4; ++w) {
+        writeU32(b + 4 * w, x[w]);
+    }
+}
+
+inline void roundB(uint8_t *b, const uint32_t *key, const Keys &k, int round)
+{
+    static constexpr int idx[4][4] = {{0, 7, 10, 13}, {1, 4, 11, 14}, {2, 5, 8, 15}, {3, 6, 9, 12}};
+    uint32_t x[4];
+    for (int w = 0; w < 4; ++w) {
+        x[w] = k.table(round, idx[w][0])[b[idx[w][0]]] ^ k.table(round, idx[w][1])[b[idx[w][1]]] ^ k.table(round, idx[w][2])[b[idx[w][2]]]
+            ^ k.table(round, idx[w][3])[b[idx[w][3]]] ^ key[w];
+    }
+    for (int w = 0; w < 4; ++w) {
+        writeU32(b + 4 * w, x[w]);
+    }
+}
+} // namespace
+
+void KeyCrypto::decryptNgWithKey(uint8_t *data, size_t len, const uint32_t *key) const
+{
+    const Keys &k = *m_keys;
+    for (size_t off = 0; off + 16 <= len; off += 16) {
+        uint8_t *b = data + off;
+        roundA(b, key + 0, k, 0);
+        roundA(b, key + 4, k, 1);
+        for (int r = 2; r <= 15; ++r) {
+            roundB(b, key + 4 * r, k, r);
+        }
+        roundA(b, key + 64, k, 16);
+    }
+}
+
+void KeyCrypto::decryptNg(uint8_t *data, size_t len, const std::string &name, uint32_t length) const
+{
+    const uint32_t idx = (gta5Hash(*m_keys, name) + length + 61u) % 101u;
+    decryptNgWithKey(data, len, m_keys->ngKeys[idx].data());
+}
+
+void KeyCrypto::encryptNg(uint8_t *, size_t, const std::string &, uint32_t) const
+{
+    throw Error("NG encryption is not available yet");
+}
+
+} // namespace rageark
