@@ -85,6 +85,23 @@ std::shared_ptr<const Keys> KeyStore::fromExe(const std::string &exePath, const 
     return keys;
 }
 
+std::shared_ptr<const Keys> KeyStore::withEncryptTables(const std::shared_ptr<const Keys> &keys, const ProgressFn &progress)
+{
+    if (!keys || keys->hasEncryptTables()) {
+        return keys;
+    }
+    auto full = std::make_shared<Keys>(*keys);
+    generateNgEncryptTables(*full, progress);
+    try {
+        const std::string cache = cachePath();
+        mkdirs(cache.substr(0, cache.find_last_of('/')));
+        saveKeysCache(*full, cache);
+    } catch (const std::exception &) {
+        // cache is an optimisation only
+    }
+    return full;
+}
+
 std::shared_ptr<const Keys> KeyStore::resolve(const std::string &configuredExe, const ProgressFn &progress)
 {
     if (auto k = loadCached()) {

@@ -20,6 +20,9 @@ public:
     static std::shared_ptr<const Keys> loadCached();
     static std::shared_ptr<const Keys> resolve(const std::string &configuredExe, const ProgressFn &progress = {});
     static std::shared_ptr<const Keys> fromExe(const std::string &exePath, const ProgressFn &progress = {});
+    // Keys with NG encrypt tables: returns keys itself when present, else generates them
+    // (one-time, seconds to minutes) and updates the cache.
+    static std::shared_ptr<const Keys> withEncryptTables(const std::shared_ptr<const Keys> &keys, const ProgressFn &progress = {});
 };
 
 } // namespace rageark
