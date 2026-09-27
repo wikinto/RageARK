@@ -2,7 +2,9 @@
 #include "ragearkplugin.h"
 
 #include "archiveentry.h"
+#include "awc.h"
 #include "exepickerquery.h"
+#include "keys.h"
 #include "keystore.h"
 #include "rpf.h"
 
@@ -105,30 +107,91 @@ bool RageArkPlugin::openPackage(QString *errorOut)
     }
 }
 
+static bool awcDecodeEnabled()
+{
+    const KConfigGroup group = KSharedConfig::openConfig(QStringLiteral("ragearkrc"))->group(QStringLiteral("Awc"));
+    return group.readEntry("decode", true);
+}
+
+void RageArkPlugin::buildListing()
+{
+    m_listed.clear();
+    m_listedIndex.clear();
+    const bool decodeAwc = awcDecodeEnabled();
+    const auto *awcKey = m_crypto ? &m_crypto->keys().awcKey : nullptr;
+    const auto &items = m_package->items();
+    auto add = [this](Listed l) {
+        m_listedIndex.insert(l.path, int(m_listed.size()));
+        m_listed.push_back(std::move(l));
+    };
+    for (size_t i = 0; i < items.size(); ++i) {
+        const auto &item = items[i];
+        const rageark::Entry &re = m_package->entry(item);
+        Listed l;
+        l.path = QString::fromStdString(item.path);
+        l.item = int(i);
+        l.isDirectory = item.isDirectory;
+        if (!item.isDirectory) {
+            l.size = re.logicalSize();
+            l.compressedSize = re.storedSize();
+        }
+        if (decodeAwc && !item.isDirectory && re.type == rageark::EntryType::Binary && rageark::endsWith(rageark::toLower(re.name), ".awc")) {
+            // decoded view (ANALYSIS 2.5): foo.awc/ folder with one file per audio stream
+            try {
+                const rageark::AwcFile awc(m_package->extract(item), re.name, awcKey);
+                l.isDirectory = true;
+                const QString dir = l.path;
+                add(l);
+                for (const auto &w : awc.waves()) {
+                    Listed s;
+                    s.path = dir + QLatin1Char('/') + QString::fromStdString(w.name + "." + w.extension);
+                    s.item = int(i);
+                    s.awcStream = w.streamIndex;
+                    s.size = w.exportSize;
+                    s.compressedSize = w.exportSize;
+                    add(s);
+                }
+                continue;
+            } catch (const std::exception &e) {
+                Q_EMIT info(i18nc("info", "%1: AWC not decoded (%2), listed as raw file", l.path, QString::fromUtf8(e.what())));
+            }
+        }
+        add(l);
+    }
+}
+
+rageark::Bytes RageArkPlugin::readListed(const Listed &l) const
+{
+    const auto &item = m_package->items()[size_t(l.item)];
+    if (l.awcStream >= 0) {
+        const rageark::Entry &re = m_package->entry(item);
+        const rageark::AwcFile awc(m_package->extract(item), re.name, m_crypto ? &m_crypto->keys().awcKey : nullptr);
+        return awc.exportStream(l.awcStream);
+    }
+    // Ark extract = CodeWalker "Extract Raw": resources keep their RSC7 header (re-importable)
+    return m_package->extract(item, rageark::ResourceExtract::Rsc7);
+}
+
 bool RageArkPlugin::list()
 {
     if (!openPackage()) {
         return false;
     }
-    const auto &items = m_package->items();
+    buildListing();
     quint64 done = 0;
-    for (const auto &item : items) {
+    for (const auto &l : m_listed) {
         if (QThread::currentThread()->isInterruptionRequested()) {
             return false;
         }
         auto *e = new Kerfuffle::Archive::Entry(); // ownership passes to Ark's model
-        if (item.isDirectory) {
-            e->setProperty("fullPath", QString::fromStdString(item.path) + QLatin1Char('/'));
-            e->setProperty("isDirectory", true);
-        } else {
-            e->setProperty("fullPath", QString::fromStdString(item.path));
-            e->setProperty("isDirectory", false);
-            const rageark::Entry &re = m_package->entry(item);
-            e->setProperty("size", qulonglong(re.logicalSize()));
-            e->setProperty("compressedSize", qulonglong(re.storedSize()));
+        e->setProperty("fullPath", l.isDirectory ? l.path + QLatin1Char('/') : l.path);
+        e->setProperty("isDirectory", l.isDirectory);
+        if (!l.isDirectory) {
+            e->setProperty("size", qulonglong(l.size));
+            e->setProperty("compressedSize", qulonglong(l.compressedSize));
         }
         Q_EMIT entry(e);
-        Q_EMIT progress(double(++done) / double(items.size() + 1));
+        Q_EMIT progress(double(++done) / double(m_listed.size() + 1));
     }
     for (const auto &w : m_package->warnings()) {
         Q_EMIT info(QString::fromStdString(w));
@@ -141,21 +204,28 @@ bool RageArkPlugin::testArchive()
     if (!openPackage()) {
         return false;
     }
+    if (m_listed.empty()) {
+        buildListing();
+    }
     quint64 done = 0;
-    const auto &items = m_package->items();
-    for (const auto &item : items) {
+    for (const auto &l : m_listed) {
         if (QThread::currentThread()->isInterruptionRequested()) {
             return false;
         }
-        if (!item.isDirectory) {
+        if (!l.isDirectory) {
             try {
-                m_package->extract(item, rageark::ResourceExtract::Payload);
+                if (l.awcStream >= 0) {
+                    readListed(l);
+                } else {
+                    // decrypt + inflate everything, resources included
+                    m_package->extract(m_package->items()[size_t(l.item)], rageark::ResourceExtract::Payload);
+                }
             } catch (const std::exception &e) {
-                Q_EMIT error(i18nc("error message", "Testing failed for %1: %2", QString::fromStdString(item.path), QString::fromUtf8(e.what())));
+                Q_EMIT error(i18nc("error message", "Testing failed for %1: %2", l.path, QString::fromUtf8(e.what())));
                 return false;
             }
         }
-        Q_EMIT progress(double(++done) / double(items.size() + 1));
+        Q_EMIT progress(double(++done) / double(m_listed.size() + 1));
     }
     Q_EMIT testSuccess();
     return true;
@@ -166,60 +236,61 @@ bool RageArkPlugin::extractFiles(const QList<Kerfuffle::Archive::Entry *> &files
     if (!openPackage()) {
         return false;
     }
-    const bool extractAll = files.isEmpty();
-    const bool preservePaths = options.preservePaths();
-    QStringList wanted;
-    for (const auto *f : files) {
-        wanted << f->fullPath(Kerfuffle::NoTrailingSlash);
+    if (m_listed.empty()) {
+        buildListing();
     }
-    // when drag&dropping, the dragged folder becomes the root and is stripped
-    std::vector<QString> rootNodes;
-    if (options.isDragAndDropEnabled()) {
+    const bool preservePaths = options.preservePaths();
+    const bool dragAndDrop = options.isDragAndDropEnabled();
+
+    // (listed index, root node to strip)
+    std::vector<std::pair<int, QString>> todo;
+    if (files.isEmpty()) {
+        for (size_t i = 0; i < m_listed.size(); ++i) {
+            todo.emplace_back(int(i), QString());
+        }
+    } else {
         for (const auto *f : files) {
-            if (!f->rootNode.isEmpty()) {
-                rootNodes.push_back(f->rootNode);
+            const auto it = m_listedIndex.constFind(f->fullPath(Kerfuffle::NoTrailingSlash));
+            if (it == m_listedIndex.constEnd()) {
+                Q_EMIT error(i18nc("error message", "Entry not found in archive: %1", f->fullPath(Kerfuffle::NoTrailingSlash)));
+                return false;
             }
+            todo.emplace_back(it.value(), dragAndDrop ? f->rootNode : QString());
         }
     }
 
     quint64 done = 0;
-    int extracted = 0;
-    for (const auto &item : m_package->items()) {
+    for (const auto &[index, rootNode] : todo) {
         if (QThread::currentThread()->isInterruptionRequested()) {
             return false;
         }
-        if (item.isDirectory) {
-            continue;
-        }
-        const QString path = QString::fromStdString(item.path);
-        QString rel = path;
-        if (!extractAll) {
-            const int idx = wanted.indexOf(path);
-            if (idx < 0) {
-                continue;
-            }
-            if (options.isDragAndDropEnabled() && !rootNodes.empty() && !rootNodes.at(idx).isEmpty()) {
-                rel.remove(rel.indexOf(rootNodes.at(idx)), rootNodes.at(idx).size());
+        const Listed &l = m_listed[size_t(index)];
+        QString rel = l.path;
+        if (!rootNode.isEmpty() && rel.startsWith(rootNode)) {
+            rel.remove(0, rootNode.size());
+            while (rel.startsWith(QLatin1Char('/'))) {
+                rel.remove(0, 1);
             }
         }
-        QString target = preservePaths ? rel : QFileInfo(rel).fileName();
-        const QString outPath = destinationDirectory + QLatin1Char('/') + target;
         if (!preservePaths) {
-            QDir().mkpath(destinationDirectory);
+            rel = QFileInfo(rel).fileName();
+        }
+        const QString outPath = destinationDirectory + QLatin1Char('/') + rel;
+        if (l.isDirectory) {
+            if (preservePaths) {
+                QDir().mkpath(outPath);
+            }
         } else {
             QDir().mkpath(QFileInfo(outPath).absolutePath());
+            try {
+                rageark::writeWholeFile(outPath.toStdString(), readListed(l));
+            } catch (const std::exception &e) {
+                Q_EMIT error(i18nc("error message", "Extraction of %1 failed: %2", l.path, QString::fromUtf8(e.what())));
+                return false;
+            }
         }
-        try {
-            const auto mode = rageark::ResourceExtract::Rsc7; // re-importable extract
-            rageark::writeWholeFile(outPath.toStdString(), m_package->extract(item, mode));
-        } catch (const std::exception &e) {
-            Q_EMIT error(i18nc("error message", "Extraction of %1 failed: %2", path, QString::fromUtf8(e.what())));
-            return false;
-        }
-        ++extracted;
-        Q_EMIT progress(double(++done) / double(m_package->items().size() + 1));
+        Q_EMIT progress(double(++done) / double(todo.size() + 1));
     }
-    Q_UNUSED(extracted)
     return true;
 }
 

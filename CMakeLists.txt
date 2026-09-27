@@ -37,6 +37,7 @@ add_library(rageark_core STATIC
     src/librageark/rpf.cpp
     src/librageark/keys.cpp
     src/librageark/keystore.cpp
+    src/librageark/awc.cpp
 )
 target_include_directories(rageark_core PUBLIC src/librageark)
 target_compile_definitions(rageark_core PRIVATE RAGEARK_MAGIC_DAT_INSTALL_PATH="${RAGEARK_MAGIC_DAT_INSTALL_PATH}")
