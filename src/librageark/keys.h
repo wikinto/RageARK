@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // GTA V key material and the AES / NG ciphers.
 // Port of CodeWalker GTACrypto.cs / GTAKeys.cs (Copyright (c) 2015 Neodymium, MIT).
 #pragma once

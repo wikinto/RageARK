@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // In-place RPF7 editing. Allocator and TOC writer ported from CodeWalker RpfFile.cs
 // (EnsureAllEntries, GetHeaderNamesData, WriteHeader, FindHole, FindEndBlock, GrowArchive,
 // RelocateFile, EnsureSpace, InsertFileSpace, CreateFile, DeleteEntry, RenameEntry).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // RPF7 archive model. Format knowledge from CodeWalker (RpfFile.cs).
 #pragma once
 

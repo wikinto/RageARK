@@ -30,9 +30,25 @@ find_library(KERFUFFLE_LIBRARY
     NAMES libkerfuffle.so.25 libkerfuffle.so.26 libkerfuffle.so.27
     REQUIRED)
 
-# CodeWalker's magic.dat (never committed); installed next to the plugin data.
-set(RAGEARK_MAGIC_DAT "" CACHE FILEPATH "CodeWalker magic.dat to install")
+# CodeWalker's magic.dat (never committed); optionally installed next to the plugin data.
+# The plugin also finds it at runtime in ~/.local/share/rageark/, /usr/local/share/rageark/,
+# /usr/share/rageark/ or via $RAGEARK_MAGIC_DAT, so a missing file is not a build error.
+set(RAGEARK_MAGIC_DAT "" CACHE FILEPATH "CodeWalker magic.dat to install (optional)")
 set(RAGEARK_MAGIC_DAT_INSTALL_PATH "${KDE_INSTALL_FULL_DATADIR}/rageark/magic.dat")
+string(CONCAT RAGEARK_MAGIC_DAT_HELP
+    "GTA V Enhanced needs CodeWalker's magic.dat (CodeWalker.Core/Resources/magic.dat in https://github.com/dexyfex/CodeWalker). Either\n"
+    "  - reconfigure with  -DRAGEARK_MAGIC_DAT=/real/path/to/CodeWalker/CodeWalker.Core/Resources/magic.dat  to install it, or\n"
+    "  - copy it by hand:  mkdir -p ~/.local/share/rageark && cp magic.dat ~/.local/share/rageark/\n"
+    "    (system-wide: sudo install -Dm644 magic.dat ${RAGEARK_MAGIC_DAT_INSTALL_PATH}), or\n"
+    "  - point the environment variable RAGEARK_MAGIC_DAT at it.\n"
+    "The plugin builds and installs without it.")
+if(NOT RAGEARK_MAGIC_DAT)
+    message(STATUS "RAGEARK_MAGIC_DAT not set: magic.dat will not be installed.")
+elseif(NOT EXISTS "${RAGEARK_MAGIC_DAT}" OR IS_DIRECTORY "${RAGEARK_MAGIC_DAT}")
+    message(WARNING "RAGEARK_MAGIC_DAT=${RAGEARK_MAGIC_DAT} does not exist, magic.dat will not be installed.\n${RAGEARK_MAGIC_DAT_HELP}")
+else()
+    message(STATUS "magic.dat will be installed to ${RAGEARK_MAGIC_DAT_INSTALL_PATH}")
+endif()
 
 add_library(rageark_core STATIC
     src/librageark/bytes.cpp
@@ -64,5 +80,12 @@ target_link_libraries(kerfuffle_rageark
 install(FILES mime/x-rockstar-rpf.xml
         DESTINATION ${KDE_INSTALL_MIMEDIR})
 if(RAGEARK_MAGIC_DAT)
-    install(FILES ${RAGEARK_MAGIC_DAT} DESTINATION ${KDE_INSTALL_DATADIR}/rageark)
+    # checked again at install time: a missing file is a warning, never an install error
+    install(CODE "
+        if(NOT EXISTS \"${RAGEARK_MAGIC_DAT}\" OR IS_DIRECTORY \"${RAGEARK_MAGIC_DAT}\")
+            message(WARNING \"magic.dat not found at ${RAGEARK_MAGIC_DAT}, skipped.\\n${RAGEARK_MAGIC_DAT_HELP}\")
+        endif()")
+    install(FILES ${RAGEARK_MAGIC_DAT} DESTINATION ${KDE_INSTALL_DATADIR}/rageark OPTIONAL)
+else()
+    install(CODE "message(STATUS \"magic.dat not installed (RAGEARK_MAGIC_DAT not set). ${RAGEARK_MAGIC_DAT_HELP}\")")
 endif()

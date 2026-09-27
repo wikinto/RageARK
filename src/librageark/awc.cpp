@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Port of CodeWalker AwcFile.cs (AWC container, RS-XXTEA, IMA ADPCM, WAV export).
 #include "awc.h"
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Port of CodeWalker GTACrypto.cs / GTAKeys.cs (Copyright (c) 2015 Neodymium, MIT).
 #include "keys.h"
 

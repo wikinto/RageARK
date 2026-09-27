@@ -86,7 +86,15 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
 cmake --build build -j"$(nproc)"
 ```
 
-`-DRAGEARK_MAGIC_DAT` is optional (see [Game keys](#game-keys)).
+Replace `/path/to/CodeWalker` with your real CodeWalker checkout. `-DRAGEARK_MAGIC_DAT` is optional
+(see [Game keys](#game-keys)). Without it, or when the path does not exist, CMake prints a warning
+and installs the plugin without `magic.dat`. In that case copy it by hand:
+
+```sh
+mkdir -p ~/.local/share/rageark
+cp /path/to/CodeWalker/CodeWalker.Core/Resources/magic.dat ~/.local/share/rageark/
+# or system-wide: sudo install -Dm644 magic.dat /usr/share/rageark/magic.dat
+```
 
 ## Installation
 
@@ -183,15 +191,14 @@ mode=on          ; on | reflink-only (back up only when a COW copy is possible) 
 If an edit is interrupted (crash, power loss), `<archive>.rpf.rageark-journal` is left behind and
 Ark shows a warning when the archive is opened. Restore the `.rageark-bak` file in that case.
 
-## Documentation
+## License
 
-- [`docs/ANALYSIS.md`](docs/ANALYSIS.md): design, RPF7 format and crypto, write path and safety
-  model, milestones
-- [`docs/TESTING.md`](docs/TESTING.md): test results and the manual in-game test procedure
+RageARK is released under the [MIT License](LICENSE). The vendored Ark headers in
+`3rdparty/kerfuffle` keep their BSD-2-Clause license (see `LICENSE`).
 
 ## Credits and legal
 
-The RPF7, RSC7 and AWC format knowledge and the GTA V key derivation come from
+The RPF7, RSC7, AWC and YTD format knowledge and the GTA V key derivation come from
 [CodeWalker](https://github.com/dexyfex/CodeWalker) by dexyfex; the NG cipher follows GTACrypto /
 GTAKeys by Neodymium. The headers in `3rdparty/kerfuffle` are from KDE Ark (BSD-2-Clause).
 

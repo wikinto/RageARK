@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // YTD (texture dictionary) parsing and DDS export.
 // Port of CodeWalker TextureDictionary/Texture (Texture.cs, legacy and gen9 layouts) and
 // DDSIO.GetDDSFile, so every exported .dds is byte-identical to CodeWalker's.

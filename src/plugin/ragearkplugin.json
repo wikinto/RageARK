@@ -1,6 +1,7 @@
 {
     "KPlugin": {
         "Description": "Browse, extract and edit Grand Theft Auto V RPF7 archives (RageARK)",
+        "License": "MIT",
         "MimeTypes": [
             "application/x-rockstar-rpf"
         ],

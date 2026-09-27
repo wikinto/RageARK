@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // AWC (audio wave container) parsing and WAV export.
 // Port of CodeWalker AwcFile.cs (PCM + IMA ADPCM to WAV; MP3 and unknown codecs exported as raw streams).
 #pragma once

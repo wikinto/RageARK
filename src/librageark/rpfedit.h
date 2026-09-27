@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // In-place RPF7 editing (CodeWalker RPF Explorer edit mode, ANALYSIS part 3).
 // Block allocator / WriteHeader / CreateFile / DeleteEntry ported from CodeWalker RpfFile.cs,
 // with RageARK's safety model: backup first, data written before any TOC, TOCs re-encrypted
