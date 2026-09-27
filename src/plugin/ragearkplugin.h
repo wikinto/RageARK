@@ -7,11 +7,13 @@
 #include <QHash>
 #include <QString>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace rageark
 {
+class ArchiveEditor;
 class KeyCrypto;
 class Package;
 }
@@ -47,7 +49,10 @@ private:
     void buildListing();
     rageark::Bytes readListed(const Listed &l) const;
     bool ensureKeys();
-    bool writeSupported(QString *errorOut = nullptr) const;
+    // Runs edit operations on the archive (backup first), commits, and updates Ark's model.
+    bool editArchive(const std::function<void(rageark::ArchiveEditor &)> &ops);
+    // Package path for a listed path; empty + error when it is a virtual AWC stream.
+    std::string editablePath(const QString &listedPath, QString *errorOut) const;
 
     std::shared_ptr<rageark::KeyCrypto> m_crypto;
     std::shared_ptr<rageark::Package> m_package;

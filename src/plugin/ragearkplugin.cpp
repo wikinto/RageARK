@@ -7,14 +7,17 @@
 #include "keys.h"
 #include "keystore.h"
 #include "rpf.h"
+#include "rpfedit.h"
 
 #include <KConfigGroup>
 #include <KLocalizedString>
 #include <KSharedConfig>
 #include <KPluginFactory>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QSet>
 #include <QThread>
 
 K_PLUGIN_CLASS_WITH_JSON(RageArkPlugin, "ragearkplugin.json")
@@ -197,6 +200,10 @@ bool RageArkPlugin::list()
     for (const auto &w : m_package->warnings()) {
         Q_EMIT info(QString::fromStdString(w));
     }
+    if (QFile::exists(QString::fromStdString(rageark::journalPath(filename().toStdString())))) {
+        Q_EMIT info(i18nc("warning", "A previous RageARK edit of this archive was interrupted. If the archive is damaged, restore %1.",
+                          QString::fromStdString(rageark::backupPath(filename().toStdString()))));
+    }
     return true;
 }
 
@@ -295,55 +302,270 @@ bool RageArkPlugin::extractFiles(const QList<Kerfuffle::Archive::Entry *> &files
     return true;
 }
 
-bool RageArkPlugin::writeSupported(QString *errorOut) const
+static rageark::BackupMode backupMode()
 {
-    if (errorOut) {
-        *errorOut = QStringLiteral("writing RPF archives is not implemented yet (M3)");
+    const KConfigGroup group = KSharedConfig::openConfig(QStringLiteral("ragearkrc"))->group(QStringLiteral("Backup"));
+    const QString mode = group.readEntry("mode", QStringLiteral("on")).toLower();
+    if (mode == QLatin1String("off")) {
+        return rageark::BackupMode::Off;
     }
-    return false;
+    if (mode == QLatin1String("reflink-only")) {
+        return rageark::BackupMode::ReflinkOnly;
+    }
+    return rageark::BackupMode::On;
+}
+
+std::string RageArkPlugin::editablePath(const QString &listedPath, QString *errorOut) const
+{
+    QString p = listedPath;
+    while (p.endsWith(QLatin1Char('/'))) {
+        p.chop(1);
+    }
+    const auto it = m_listedIndex.constFind(p);
+    if (it != m_listedIndex.constEnd() && m_listed[size_t(it.value())].awcStream >= 0) {
+        if (errorOut) {
+            *errorOut = i18nc("error message",
+                              "%1 is a decoded audio stream and cannot be changed. Edit the .awc file itself "
+                              "(set decode=false under [Awc] in ~/.config/ragearkrc to show raw .awc files).",
+                              p);
+        }
+        return {};
+    }
+    return p.toStdString();
+}
+
+bool RageArkPlugin::editArchive(const std::function<void(rageark::ArchiveEditor &)> &ops)
+{
+    if (!openPackage()) {
+        return false;
+    }
+    if (m_listed.empty()) {
+        buildListing();
+    }
+    // NG archives are re-encrypted on write (no ASI needed): make sure the encrypt tables exist
+    bool needsNg = false;
+    for (const auto &a : m_package->archives()) {
+        needsNg = needsNg || a.encryption == rageark::Encryption::Ng;
+    }
+    auto infoFn = [this](const std::string &s) {
+        Q_EMIT info(QString::fromStdString(s));
+    };
+    if (needsNg && !m_crypto->canEncryptNg()) {
+        Q_EMIT info(i18nc("info", "Generating NG encryption tables (one-time, may take a minute)..."));
+        try {
+            auto keys = rageark::KeyStore::withEncryptTables(std::shared_ptr<const rageark::Keys>(m_crypto, &m_crypto->keys()), infoFn);
+            m_crypto = std::make_shared<rageark::KeyCrypto>(keys);
+        } catch (const std::exception &e) {
+            Q_EMIT error(i18nc("error message", "Could not generate NG encryption tables: %1", QString::fromUtf8(e.what())));
+            return false;
+        }
+    }
+
+    QSet<QString> before;
+    for (const auto &l : m_listed) {
+        before.insert(l.path);
+    }
+
+    QString failure;
+    try {
+        rageark::EditOptions options;
+        options.backup = backupMode();
+        options.info = infoFn;
+        rageark::ArchiveEditor editor(filename().toStdString(), m_crypto.get(), options);
+        try {
+            ops(editor);
+        } catch (const std::exception &e) {
+            failure = QString::fromUtf8(e.what());
+        }
+        editor.commit(); // keep everything that succeeded consistent on disk
+    } catch (const std::exception &e) {
+        failure = failure.isEmpty() ? QString::fromUtf8(e.what()) : failure + QLatin1String("; ") + QString::fromUtf8(e.what());
+    }
+
+    // reload and tell Ark's model what changed
+    m_package.reset();
+    m_listed.clear();
+    m_listedIndex.clear();
+    if (openPackage()) {
+        buildListing();
+        QSet<QString> after;
+        for (const auto &l : m_listed) {
+            after.insert(l.path);
+            if (!before.contains(l.path)) {
+                auto *e = new Kerfuffle::Archive::Entry();
+                e->setProperty("fullPath", l.isDirectory ? l.path + QLatin1Char('/') : l.path);
+                e->setProperty("isDirectory", l.isDirectory);
+                if (!l.isDirectory) {
+                    e->setProperty("size", qulonglong(l.size));
+                    e->setProperty("compressedSize", qulonglong(l.compressedSize));
+                }
+                Q_EMIT entry(e);
+            }
+        }
+        for (const auto &p : std::as_const(before)) {
+            if (!after.contains(p)) {
+                Q_EMIT entryRemoved(p);
+            }
+        }
+    }
+    if (!failure.isEmpty()) {
+        Q_EMIT error(i18nc("error message", "Editing the RPF archive failed: %1", failure));
+        return false;
+    }
+    return true;
 }
 
 bool RageArkPlugin::addFiles(const QList<Kerfuffle::Archive::Entry *> &files, const Kerfuffle::Archive::Entry *destination, const Kerfuffle::CompressionOptions &options, uint numberOfEntriesToAdd)
 {
-    Q_UNUSED(files)
-    Q_UNUSED(destination)
     Q_UNUSED(options)
-    Q_UNUSED(numberOfEntriesToAdd)
-    QString e;
-    writeSupported(&e);
-    Q_EMIT error(e);
-    return false;
+    QString prefix;
+    if (destination) {
+        QString err;
+        const std::string dest = editablePath(destination->fullPath(Kerfuffle::NoTrailingSlash), &err);
+        if (!err.isEmpty()) {
+            Q_EMIT error(err);
+            return false;
+        }
+        if (m_listedIndex.contains(destination->fullPath(Kerfuffle::NoTrailingSlash))) {
+            const auto &l = m_listed[size_t(m_listedIndex.value(destination->fullPath(Kerfuffle::NoTrailingSlash)))];
+            if (l.item >= 0 && l.awcStream < 0 && l.isDirectory && !m_package->items()[size_t(l.item)].isDirectory) {
+                Q_EMIT error(i18nc("error message", "Files cannot be added into a decoded .awc folder."));
+                return false;
+            }
+        }
+        prefix = QString::fromStdString(dest) + QLatin1Char('/');
+    }
+    const double total = numberOfEntriesToAdd ? double(numberOfEntriesToAdd) : double(files.size());
+    return editArchive([&](rageark::ArchiveEditor &ed) {
+        quint64 done = 0;
+        auto addOne = [&](const QString &rel) {
+            const QFileInfo fi(rel);
+            QString inArchive = rel;
+            while (inArchive.startsWith(QLatin1String("./"))) {
+                inArchive.remove(0, 2);
+            }
+            while (inArchive.endsWith(QLatin1Char('/'))) {
+                inArchive.chop(1);
+            }
+            inArchive = prefix + inArchive;
+            if (fi.isDir()) {
+                ed.addDirectory(inArchive.toStdString());
+            } else {
+                if (fi.size() > 0x3FFFFFFF) { // CodeWalker's import limit (ExploreForm.cs:3088)
+                    throw rageark::Error(rel.toStdString() + ": files larger than 1 GiB cannot be imported");
+                }
+                ed.addFile(inArchive.toStdString(), rageark::readWholeFile(fi.filePath().toStdString()));
+            }
+            Q_EMIT progress(double(++done) / (total + 1));
+        };
+        for (const auto *f : files) {
+            if (QThread::currentThread()->isInterruptionRequested()) {
+                break;
+            }
+            const QString rel = f->fullPath();
+            addOne(rel);
+            if (QFileInfo(rel).isDir()) {
+                QDirIterator it(rel, QDir::AllEntries | QDir::Readable | QDir::Hidden | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+                while (it.hasNext() && !QThread::currentThread()->isInterruptionRequested()) {
+                    addOne(it.next());
+                }
+            }
+        }
+    });
 }
 
 bool RageArkPlugin::moveFiles(const QList<Kerfuffle::Archive::Entry *> &files, Kerfuffle::Archive::Entry *destination, const Kerfuffle::CompressionOptions &options)
 {
-    Q_UNUSED(files)
-    Q_UNUSED(destination)
     Q_UNUSED(options)
-    QString e;
-    writeSupported(&e);
-    Q_EMIT error(e);
-    return false;
+    if (!openPackage()) {
+        return false;
+    }
+    if (m_listed.empty()) {
+        buildListing();
+    }
+    const auto tops = entriesWithoutChildren(files);
+    QStringList paths = entryFullPaths(files);
+    paths.sort();
+    const QStringList dests = entryPathsFromDestination(paths, destination, tops.count());
+    std::vector<std::pair<std::string, std::string>> moves;
+    for (const auto *t : tops) {
+        const int i = paths.indexOf(t->fullPath());
+        QString err;
+        const std::string from = editablePath(t->fullPath(), &err);
+        const std::string to = i >= 0 ? editablePath(dests.at(i), &err) : std::string();
+        if (!err.isEmpty() || i < 0) {
+            Q_EMIT error(err.isEmpty() ? i18nc("error message", "Cannot move %1", t->fullPath()) : err);
+            return false;
+        }
+        moves.emplace_back(from, to);
+    }
+    return editArchive([&](rageark::ArchiveEditor &ed) {
+        size_t done = 0;
+        for (const auto &[from, to] : moves) {
+            ed.move(from, to);
+            Q_EMIT progress(double(++done) / double(moves.size() + 1));
+        }
+    });
 }
 
 bool RageArkPlugin::copyFiles(const QList<Kerfuffle::Archive::Entry *> &files, Kerfuffle::Archive::Entry *destination, const Kerfuffle::CompressionOptions &options)
 {
-    Q_UNUSED(files)
-    Q_UNUSED(destination)
     Q_UNUSED(options)
-    QString e;
-    writeSupported(&e);
-    Q_EMIT error(e);
-    return false;
+    if (!openPackage()) {
+        return false;
+    }
+    if (m_listed.empty()) {
+        buildListing();
+    }
+    const auto tops = entriesWithoutChildren(files);
+    QStringList paths = entryFullPaths(files);
+    const QStringList dests = entryPathsFromDestination(paths, destination, 0);
+    std::vector<std::pair<std::string, std::string>> copies;
+    for (const auto *t : tops) {
+        const int i = paths.indexOf(t->fullPath());
+        QString err;
+        const std::string from = editablePath(t->fullPath(), &err);
+        const std::string to = i >= 0 ? editablePath(dests.at(i), &err) : std::string();
+        if (!err.isEmpty() || i < 0) {
+            Q_EMIT error(err.isEmpty() ? i18nc("error message", "Cannot copy %1", t->fullPath()) : err);
+            return false;
+        }
+        copies.emplace_back(from, to);
+    }
+    return editArchive([&](rageark::ArchiveEditor &ed) {
+        size_t done = 0;
+        for (const auto &[from, to] : copies) {
+            ed.copy(from, to);
+            Q_EMIT progress(double(++done) / double(copies.size() + 1));
+        }
+    });
 }
 
 bool RageArkPlugin::deleteFiles(const QList<Kerfuffle::Archive::Entry *> &files)
 {
-    Q_UNUSED(files)
-    QString e;
-    writeSupported(&e);
-    Q_EMIT error(e);
-    return false;
+    if (!openPackage()) {
+        return false;
+    }
+    if (m_listed.empty()) {
+        buildListing();
+    }
+    std::vector<std::string> doomed;
+    for (const auto *t : entriesWithoutChildren(files)) {
+        QString err;
+        const std::string p = editablePath(t->fullPath(), &err);
+        if (!err.isEmpty()) {
+            Q_EMIT error(err);
+            return false;
+        }
+        doomed.push_back(p);
+    }
+    return editArchive([&](rageark::ArchiveEditor &ed) {
+        size_t done = 0;
+        for (const auto &p : doomed) {
+            ed.remove(p);
+            Q_EMIT progress(double(++done) / double(doomed.size() + 1));
+        }
+    });
 }
 
 bool RageArkPlugin::addComment(const QString &comment)

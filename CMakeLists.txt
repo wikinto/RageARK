@@ -49,6 +49,7 @@ kcoreaddons_add_plugin(kerfuffle_rageark
     SOURCES src/plugin/ragearkplugin.cpp src/plugin/exepickerquery.cpp
     INSTALL_NAMESPACE kerfuffle)
 target_include_directories(kerfuffle_rageark PRIVATE src/plugin 3rdparty/kerfuffle)
+target_compile_definitions(kerfuffle_rageark PRIVATE TRANSLATION_DOMAIN="rageark")
 target_link_libraries(kerfuffle_rageark
     PRIVATE
         rageark_core
