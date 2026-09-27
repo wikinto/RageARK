@@ -75,6 +75,11 @@ std::shared_ptr<const Keys> KeyStore::fromExe(const std::string &exePath, const 
     }
     const std::string magic = findMagicDat();
     auto keys = std::make_shared<Keys>(deriveKeys(exePath, magic, progress));
+    // keep already generated NG encrypt tables for the same key set
+    if (auto old = loadCached(); old && old->hasEncryptTables() && old->ngDecryptTables == keys->ngDecryptTables) {
+        keys->ngEncryptTables = old->ngEncryptTables;
+        keys->ngEncryptLuts = old->ngEncryptLuts;
+    }
     try {
         const std::string cache = cachePath();
         mkdirs(cache.substr(0, cache.find_last_of('/')));
