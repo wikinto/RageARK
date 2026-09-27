@@ -8,6 +8,7 @@
 #include "keystore.h"
 #include "rpf.h"
 #include "rpfedit.h"
+#include "ytd.h"
 
 #include <KConfigGroup>
 #include <KLocalizedString>
@@ -110,17 +111,20 @@ bool RageArkPlugin::openPackage(QString *errorOut)
     }
 }
 
-static bool awcDecodeEnabled()
+// [Awc] decode / [Ytd] decode in ragearkrc
+static bool decodeEnabled(const QString &group)
 {
-    const KConfigGroup group = KSharedConfig::openConfig(QStringLiteral("ragearkrc"))->group(QStringLiteral("Awc"));
-    return group.readEntry("decode", true);
+    return KSharedConfig::openConfig(QStringLiteral("ragearkrc"))->group(group).readEntry("decode", true);
 }
 
 void RageArkPlugin::buildListing()
 {
     m_listed.clear();
     m_listedIndex.clear();
-    const bool decodeAwc = awcDecodeEnabled();
+    m_ytdItem = -1;
+    m_ytd.reset();
+    const bool decodeAwc = decodeEnabled(QStringLiteral("Awc"));
+    const bool decodeYtd = decodeEnabled(QStringLiteral("Ytd"));
     const auto *awcKey = m_crypto ? &m_crypto->keys().awcKey : nullptr;
     const auto &items = m_package->items();
     auto add = [this](Listed l) {
@@ -160,6 +164,35 @@ void RageArkPlugin::buildListing()
                 Q_EMIT info(i18nc("info", "%1: AWC not decoded (%2), listed as raw file", l.path, QString::fromUtf8(e.what())));
             }
         }
+        if (decodeYtd && !item.isDirectory && re.type == rageark::EntryType::Resource && rageark::endsWith(rageark::toLower(re.name), ".ytd")) {
+            // decoded view: foo.ytd/ folder with one .dds per texture (CodeWalker's DDS export).
+            // Listing needs only the system pages, the pixel data is read on extraction.
+            try {
+                const rageark::YtdFile ytd(m_package->extractResourceHead(item, rageark::YtdFile::headerSize(re.systemFlags)), re.systemFlags,
+                                           re.graphicsFlags);
+                l.isDirectory = true;
+                const QString dir = l.path;
+                add(l);
+                const auto &textures = ytd.textures();
+                for (size_t t = 0; t < textures.size(); ++t) {
+                    if (!textures[t].ddsError.empty()) {
+                        Q_EMIT info(i18nc("info", "%1: texture %2 cannot be exported (%3)", l.path, QString::fromStdString(textures[t].name),
+                                          QString::fromStdString(textures[t].ddsError)));
+                        continue;
+                    }
+                    Listed s;
+                    s.path = dir + QLatin1Char('/') + QString::fromStdString(textures[t].fileName);
+                    s.item = int(i);
+                    s.ytdTexture = int(t);
+                    s.size = textures[t].ddsSize;
+                    s.compressedSize = textures[t].ddsSize;
+                    add(s);
+                }
+                continue;
+            } catch (const std::exception &e) {
+                Q_EMIT info(i18nc("info", "%1: texture dictionary not decoded (%2), listed as raw file", l.path, QString::fromUtf8(e.what())));
+            }
+        }
         add(l);
     }
 }
@@ -171,6 +204,14 @@ rageark::Bytes RageArkPlugin::readListed(const Listed &l) const
         const rageark::Entry &re = m_package->entry(item);
         const rageark::AwcFile awc(m_package->extract(item), re.name, m_crypto ? &m_crypto->keys().awcKey : nullptr);
         return awc.exportStream(l.awcStream);
+    }
+    if (l.ytdTexture >= 0) {
+        if (m_ytdItem != l.item || !m_ytd) {
+            const rageark::Entry &re = m_package->entry(item);
+            m_ytd = std::make_shared<rageark::YtdFile>(m_package->extract(item, rageark::ResourceExtract::Payload), re.systemFlags, re.graphicsFlags);
+            m_ytdItem = l.item;
+        }
+        return m_ytd->dds(size_t(l.ytdTexture));
     }
     // Ark extract = CodeWalker "Extract Raw": resources keep their RSC7 header (re-importable)
     return m_package->extract(item, rageark::ResourceExtract::Rsc7);
@@ -223,7 +264,7 @@ bool RageArkPlugin::testArchive()
         }
         if (!l.isDirectory) {
             try {
-                if (l.awcStream >= 0) {
+                if (l.isVirtual()) {
                     readListed(l);
                 } else {
                     // decrypt + inflate everything, resources included
@@ -323,6 +364,15 @@ std::string RageArkPlugin::editablePath(const QString &listedPath, QString *erro
         p.chop(1);
     }
     const auto it = m_listedIndex.constFind(p);
+    if (it != m_listedIndex.constEnd() && m_listed[size_t(it.value())].ytdTexture >= 0) {
+        if (errorOut) {
+            *errorOut = i18nc("error message",
+                              "%1 is a texture decoded from its .ytd file and cannot be changed here. Replace the whole .ytd file "
+                              "(set decode=false under [Ytd] in ~/.config/ragearkrc to show raw .ytd files).",
+                              p);
+        }
+        return {};
+    }
     if (it != m_listedIndex.constEnd() && m_listed[size_t(it.value())].awcStream >= 0) {
         if (errorOut) {
             *errorOut = i18nc("error message",
@@ -385,6 +435,8 @@ bool RageArkPlugin::editArchive(const std::function<void(rageark::ArchiveEditor 
 
     // reload and tell Ark's model what changed
     m_package.reset();
+    m_ytd.reset();
+    m_ytdItem = -1;
     m_listed.clear();
     m_listedIndex.clear();
     if (openPackage()) {
@@ -420,17 +472,28 @@ bool RageArkPlugin::editArchive(const std::function<void(rageark::ArchiveEditor 
 bool RageArkPlugin::addFiles(const QList<Kerfuffle::Archive::Entry *> &files, const Kerfuffle::Archive::Entry *destination, const Kerfuffle::CompressionOptions &options, uint numberOfEntriesToAdd)
 {
     Q_UNUSED(options)
+    if (!openPackage()) {
+        return false;
+    }
+    if (m_listed.empty()) {
+        buildListing();
+    }
     QString prefix;
     if (destination) {
+        const QString destPath = destination->fullPath(Kerfuffle::NoTrailingSlash);
         QString err;
-        const std::string dest = editablePath(destination->fullPath(Kerfuffle::NoTrailingSlash), &err);
+        const std::string dest = editablePath(destPath, &err);
         if (!err.isEmpty()) {
             Q_EMIT error(err);
             return false;
         }
-        if (m_listedIndex.contains(destination->fullPath(Kerfuffle::NoTrailingSlash))) {
-            const auto &l = m_listed[size_t(m_listedIndex.value(destination->fullPath(Kerfuffle::NoTrailingSlash)))];
-            if (l.item >= 0 && l.awcStream < 0 && l.isDirectory && !m_package->items()[size_t(l.item)].isDirectory) {
+        if (m_listedIndex.contains(destPath)) {
+            const auto &l = m_listed[size_t(m_listedIndex.value(destPath))];
+            if (l.item >= 0 && !l.isVirtual() && l.isDirectory && !m_package->items()[size_t(l.item)].isDirectory) {
+                // a decoded file shown as a folder
+                if (m_package->entry(m_package->items()[size_t(l.item)]).type == rageark::EntryType::Resource) {
+                    return replaceTextures(l, files);
+                }
                 Q_EMIT error(i18nc("error message", "Files cannot be added into a decoded .awc folder."));
                 return false;
             }
@@ -473,6 +536,51 @@ bool RageArkPlugin::addFiles(const QList<Kerfuffle::Archive::Entry *> &files, co
                 }
             }
         }
+    });
+}
+
+bool RageArkPlugin::replaceTextures(const Listed &ytdFolder, const QList<Kerfuffle::Archive::Entry *> &files)
+{
+    const rageark::Item &item = m_package->items()[size_t(ytdFolder.item)];
+    const rageark::Entry &re = m_package->entry(item);
+    std::unique_ptr<rageark::YtdFile> ytd;
+    try {
+        ytd = std::make_unique<rageark::YtdFile>(m_package->extract(item, rageark::ResourceExtract::Payload), re.systemFlags, re.graphicsFlags);
+    } catch (const std::exception &e) {
+        Q_EMIT error(i18nc("error message", "%1 cannot be read: %2", ytdFolder.path, QString::fromUtf8(e.what())));
+        return false;
+    }
+    for (const auto *f : files) {
+        const QFileInfo fi(f->fullPath());
+        if (fi.isDir()) {
+            Q_EMIT error(i18nc("error message", "Folders cannot be added into a .ytd texture dictionary."));
+            return false;
+        }
+        int index = -1;
+        const auto &textures = ytd->textures();
+        for (size_t t = 0; t < textures.size(); ++t) {
+            if (QString::fromStdString(textures[t].fileName).compare(fi.fileName(), Qt::CaseInsensitive) == 0) {
+                index = int(t);
+            }
+        }
+        if (index < 0) {
+            Q_EMIT error(i18nc("error message",
+                               "%1 has no texture %2. Textures can only be replaced: add a DDS file named like an existing texture, "
+                               "with the same format, size and mip levels.",
+                               ytdFolder.path, fi.fileName()));
+            return false;
+        }
+        try {
+            ytd->replaceTexture(size_t(index), rageark::readWholeFile(fi.filePath().toStdString()));
+        } catch (const std::exception &e) {
+            Q_EMIT error(i18nc("error message", "Cannot replace texture %1: %2", fi.fileName(), QString::fromUtf8(e.what())));
+            return false;
+        }
+    }
+    const rageark::Bytes rsc7 = ytd->rsc7();
+    const std::string path = item.path;
+    return editArchive([&](rageark::ArchiveEditor &ed) {
+        ed.addFile(path, rsc7);
     });
 }
 

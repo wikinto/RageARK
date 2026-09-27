@@ -41,6 +41,7 @@ add_library(rageark_core STATIC
     src/librageark/keys.cpp
     src/librageark/keystore.cpp
     src/librageark/awc.cpp
+    src/librageark/ytd.cpp
     src/librageark/rpfedit.cpp
 )
 target_include_directories(rageark_core PUBLIC src/librageark)

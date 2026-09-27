@@ -52,6 +52,33 @@ Bytes inflateRaw(const uint8_t *data, size_t len, size_t sizeHint)
     return std::move(*r);
 }
 
+Bytes inflateRawPrefix(const uint8_t *data, size_t len, size_t maxOut)
+{
+    z_stream zs{};
+    if (inflateInit2(&zs, -15) != Z_OK) {
+        throw Error("inflateInit failed");
+    }
+    Bytes out(maxOut);
+    zs.next_in = const_cast<Bytef *>(data);
+    zs.avail_in = uInt(len);
+    zs.next_out = out.data();
+    zs.avail_out = uInt(out.size());
+    int ret = Z_OK;
+    while (zs.avail_out > 0 && ret == Z_OK) {
+        ret = inflate(&zs, Z_NO_FLUSH);
+        if (ret == Z_BUF_ERROR && zs.avail_in == 0) {
+            break; // input exhausted
+        }
+    }
+    const size_t produced = out.size() - zs.avail_out;
+    inflateEnd(&zs);
+    if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+        throw Error("inflate failed (corrupt data or wrong key)");
+    }
+    out.resize(produced);
+    return out;
+}
+
 Bytes deflateRaw(const uint8_t *data, size_t len, int level)
 {
     z_stream zs{};

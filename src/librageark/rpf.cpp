@@ -340,6 +340,44 @@ Bytes Package::extract(int archive, int entry, ResourceExtract mode) const
     return Bytes(data.begin() + 16, data.end());
 }
 
+Bytes Package::extractResourceHead(const Item &item, size_t maxBytes) const
+{
+    const Archive &a = m_archives[size_t(item.archive)];
+    const Entry &e = a.entries[size_t(item.entry)];
+    if (e.type != EntryType::Resource) {
+        throw Error(e.name + ": not a resource");
+    }
+    const uint64_t stored = e.storedSize();
+    if (stored < 16 || a.startPos + uint64_t(e.fileOffset) * BlockSize + stored > a.startPos + a.size) {
+        throw Error(e.name + ": data out of archive bounds");
+    }
+    const uint64_t payloadPos = a.startPos + uint64_t(e.fileOffset) * BlockSize + 16;
+    const uint64_t payloadLen = stored - 16;
+    // grow the compressed window until it yields maxBytes (the NG/AES ciphers work on
+    // independent 16-byte blocks, so a 16-byte aligned prefix decrypts on its own)
+    for (uint64_t window = 64 * 1024;; window *= 4) {
+        const uint64_t take = std::min(window, payloadLen);
+        Bytes data = m_reader->read(payloadPos, size_t(take));
+        if (e.encrypted) {
+            const size_t aligned = take == payloadLen ? data.size() : data.size() & ~size_t(15);
+            decryptBlock(a, data.data(), aligned, e.name, e.fileSize);
+            data.resize(aligned);
+        }
+        Bytes out;
+        try {
+            out = inflateRawPrefix(data.data(), data.size(), maxBytes);
+        } catch (const Error &) {
+            // not deflated: extract() then returns the stored payload as is
+            out = extract(item, ResourceExtract::Payload);
+            out.resize(std::min(out.size(), maxBytes));
+            return out;
+        }
+        if (out.size() >= maxBytes || take == payloadLen) {
+            return out;
+        }
+    }
+}
+
 // ---------------- builder ----------------
 
 BuildNode BuildNode::dir(std::string name, std::vector<BuildNode> children)

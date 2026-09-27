@@ -143,6 +143,9 @@ public:
         return extract(item.archive, item.entry, mode);
     }
 
+    // First maxBytes of a resource's decompressed payload (reads and decrypts only what is needed).
+    Bytes extractResourceHead(const Item &item, size_t maxBytes) const;
+
 private:
     void parseArchive(int index);
     void flatten();

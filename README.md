@@ -9,6 +9,10 @@ It brings CodeWalker's *RPF Explorer* edit mode to Ark and Dolphin on Linux:
   (`.ydr`, `.ytd`, …) are extracted with their RSC7 header, so they can be re-imported.
 - **Audio:** `.awc` sound banks appear as folders with one `.wav` per stream (PCM/ADPCM, identical
   to CodeWalker's export). MP3 streams (codec 7) are extracted as `.mp3`.
+- **Textures:** `.ytd` texture dictionaries appear as folders with one `.dds` per texture (DXT1/3/5,
+  BC4/5/7 and uncompressed formats, Legacy and Enhanced), byte-identical to CodeWalker's DDS
+  export. Dropping an edited `.dds` of the same name, format, size and mip count into the folder
+  replaces that texture in the `.ytd`.
 - **Edit in place:** add, replace, delete, rename, move and copy files, also inside nested archives.
   Every table of contents is re-encrypted with the game's own NG encryption, so edited archives
   do not need an ASI loader, OpenIV or RageOpenV.
@@ -20,7 +24,7 @@ Supported games: GTA V Legacy and Enhanced (PC).
 RageARK is built out of tree against the Ark already installed on your system. Ark itself is never
 rebuilt.
 
-> **Status.** Reading, extraction and audio decoding are verified byte for byte against CodeWalker
+> **Status.** Reading, extraction, audio decoding and texture export are verified byte for byte against CodeWalker
 > on real game archives. Editing is verified with CodeWalker and by re-encrypting Rockstar's own
 > tables of contents. Loading edited archives in the game has not been tested yet. GTA V Enhanced
 > caches every archive's table of contents in `rpf.cache`, so it may not accept edited archives
@@ -145,6 +149,19 @@ done
 (`3rdparty/kerfuffle/kerfuffle_export.h` is a small replacement for a file Ark generates at build
 time; keep it.) Rebuild and reinstall after every Ark major upgrade.
 
+## Editing textures
+
+Extract a texture from a `foo.ytd` folder, edit it in a DDS-capable editor (GIMP, Paint.NET,
+Photoshop with the NVIDIA plugin, `texconv`, …) and save it as DDS with the **same format, size and
+number of mip levels**. Then add it to the same `foo.ytd` folder (*Add Files* with the folder
+selected, or drag and drop onto it). The texture is replaced inside the `.ytd`. RageARK refuses
+files with a different format, size or mip count, and new texture names. Adding, removing or
+resizing textures needs a full resource rebuild, which RageARK does not do yet. To replace the
+whole `.ytd`, add a `.ytd` file with the same name to the folder that contains it.
+
+To view `.dds` files on KDE, install the `kimageformat6-plugins` package (Debian) or
+`kimageformats` (Arch).
+
 ## Configuration
 
 `~/.config/ragearkrc`:
@@ -155,6 +172,9 @@ gta_exe=/path/to/GTA5_Enhanced.exe   ; written by the first-run dialog
 
 [Awc]
 decode=true      ; false: show .awc files as raw files instead of folders of .wav/.mp3
+
+[Ytd]
+decode=true      ; false: show .ytd files as raw files instead of folders of .dds textures
 
 [Backup]
 mode=on          ; on | reflink-only (back up only when a COW copy is possible) | off
